@@ -31,9 +31,16 @@ class varpoly(eos):
         self.Svapstate=[]
         self.Uvapstate=[]
         self.Tvapstate=[]
-        self.S=self.F=self.H=[]
+        self.S=self.F=self.H=self.G=[]
+        
+        # For mixtures
+        self.materials = []  # List of materials
+        self.concentrations = []  # Concentration parameters for each material
+        self.is_mixture = False  # Flag to indicate if this is a mixture
+        
+
     
-    def creatematerial(self,rho0,B0,dBdP0,AA,ZZ,tmin,delta):
+    def creatematerial(self,rho0,B0,dBdP0,AA,ZZ,tmin,delta,a_exp,b_exp=5./3.,c_exp=0.6):
         self.rho0=float(rho0)
         self.B0=float(B0)
         self.dBdP0=float(dBdP0)
@@ -41,6 +48,8 @@ class varpoly(eos):
         self.ZZ=float(ZZ)
         self.tmin=float(tmin)
         self.delta=float(delta)
+        
+        #Compressed state
         self.findA()
         self.etacrit=float(self.rho_critical/self.rho0)
         x2=self.A0/self.A1
@@ -50,18 +59,78 @@ class varpoly(eos):
         self.G2_const = (1./b*(x2**b*mp.gammainc(1-n,a=x2)-mp.gammainc(1-n+b,a=x2)))
         self.rho=np.array([float(self.rho0)])
         self.grun0,self.grun_q0,self.grun_lamb0 = self.calculate_grun_cold(self.rho0)
-     
-    def createexpstate(self,a,b=5./3.,c=0.6):
-        self.Pexp_const_a=a
-        self.Pexp_const_b=b
-        self.Bexp0=self.B0/(a-b)
-        self.grun_const_c=c
+        
+        ##Generate expanded state
+        self.Pexp_const_a=a_exp
+        self.Pexp_const_b=b_exp
+        self.Bexp0=self.B0/(a_exp-b_exp)
+        self.grun_const_c=c_exp
         self.grun_ideal=1./3.
         yk=1+self.grun0-self.grun_ideal
-        self.grun_const_d=yk*c+self.grun_q0*self.grun0
+        self.grun_const_d=yk*c_exp+self.grun_q0*self.grun0
+
+    def add_mixture(self, materials, concentrations):
+        """
+        Add multiple materials and their concentrations to create a mixture,
+        then call creatematerial to initialize the mixture with the new averaged properties.
+        
+        :param materials: List of varpoly materials
+        :param concentrations: List of concentration parameters for each material
+        """
+        if sum(concentrations) != 1:
+            raise ValueError("Concentrations must sum to 1.")
+        
+        self.materials = materials
+        self.concentrations = concentrations
+        self.is_mixture = True
+        
+        # Directly update the properties for the mixture
+        self.rho0 = 0
+        self.B0 = 0
+        self.dBdP0 = 0
+        self.AA = 0
+        self.ZZ = 0
+        self.tmin = 0
+        self.delta = 0
+        self.Pexp_const_a = 0
+        self.Pexp_const_b = 0
+        self.grun_const_c = 0
+        
+        # Mix the properties of the materials
+        for material, concentration in zip(materials, concentrations):
+            self.rho0 += material.rho0 * concentration
+            self.B0 += material.B0 * concentration
+            self.dBdP0 += material.dBdP0 * concentration**2
+            self.AA += material.AA * concentration
+            self.ZZ += material.ZZ * concentration
+            self.tmin += material.tmin * concentration
+            self.delta += material.delta * concentration
+            self.Pexp_const_a += material.Pexp_const_a * concentration
+            self.Pexp_const_b += material.Pexp_const_b * concentration
+            self.grun_const_c += material.grun_const_c * concentration
+        
+        # Now call creatematerial for the mixture with the averaged properties
+        self.creatematerial(self.rho0, self.B0, self.dBdP0, self.AA, self.ZZ, 
+                            self.tmin, self.delta, self.Pexp_const_a, self.Pexp_const_b, self.grun_const_c)
+
+    def display_properties(self):
+        """Display the properties of the material or mixture."""
+        print(f"Density: {self.rho0}")
+        print(f"Bulk Modulus: {self.B0}")
+        print(f"Derivative of Bulk Modulus: {self.dBdP0}")
+        print(f"AA nr: {self.AA}")
+        print(f"ZZ nr : {self.ZZ}")
+        print(f"tmin : {self.tmin}")
+        print(f"tdelta : {self.delta}")
+        print(f"Gruneisen Parameter: {self.grun0}")
+        print(f"Derivative Gruneisen Parameter: {self.grun_q0}")
+        print(f"Double Derivative Gruneisen Parameter: {self.grun_lamb0}")
+        print(f"Expanded State Parameters: a_exp={self.Pexp_const_a}, b_exp={self.Pexp_const_b}, c_exp={self.grun_const_c}")
         
     def getmaterial(self):
         pass
+    
+
 ## Calculates the cold pressure               
     def calculate_P_cold(self,rho):    
         self.checkmat(rho)
@@ -156,7 +225,6 @@ class varpoly(eos):
 
 ## DERIVATIVES OF BULK MODULUS COLD    
     def calculate_dBdP_cold(self,rho):
-
         self.checkmat(rho)
         self.calculate_B_cold(self.rho)
         if type(self.dBdP_c) is not np.ndarray:
@@ -226,39 +294,38 @@ class varpoly(eos):
         self.calculate_dBdP_cold(self.rho) 
         self.calculate_tparam(self.rho)
         
-        if type(self.grun) is not np.ndarray:
-            self.grun = np.zeros_like(self.rho)
-            self.grun_q = np.zeros_like(self.rho)
-            self.grun_lamb = np.zeros_like(self.rho)
-            for i in range(len(self.rho)):
-                if(self.rho[i] >= self.rho0):
-                    F=self.P_c[i]/self.B_c[i];
-                    Ng=self.dBdP_c[i]/2-1/6;
-                    Dg=1-(2*self.t[i]/3)*F;
-                    Tg=(self.t[i]/3)*(1-F/3);
-                    taug=(self.P_c[i]/3)*self.dtdP[i];
-                    dF=1/self.B_c[i]-(self.P_c[i]*self.dBdP_c[i])/self.B_c[i]**2;
-                    dN=self.d2BdP_c[i]/2;
-                    dD=(-2/3)*(self.dtdP[i]*F+dF*self.t[i]);
-                    dT=(self.dtdP[i]/3)*(1-F/3)-(dF*self.t[i])/9;
-                    dtau=(1/3)*(self.dtdP[i]+self.P_c[i]*self.d2tdP[i]);
-                    d2F=(1/self.B_c[i]**3)*(2*self.P_c[i]*self.dBdP_c[i]**2-self.B_c[i]*(self.P_c[i]*self.d2BdP_c[i]+2*self.dBdP_c[i]));
-                    d2N=self.d3BdP_c[i]/2;
-                    d2D=(-2/3)*(self.d2tdP[i]*F+2*self.dtdP[i]*dF+d2F*self.t[i]);
-                    d2T=(self.d2tdP[i]/3)*(1-F/3)-2*(self.dtdP[i]/9)*dF-(d2F*self.t[i])/9;
-                    d2tau=(1/3)*(2*self.d2tdP[i]+self.P_c[i]*self.d3tdP[i]);
-                    self.grun[i]= (Ng-Tg-taug)/Dg;
-                    dgamma=(1/Dg)*((dN-dtau-dT)-dD*self.grun[i]);
-                    self.grun_q[i]=(-self.B_c[i]/self.grun[i])*dgamma;
-                    d2gamma=(1/Dg**2)*(Dg*(d2N-d2tau-self.grun[i]*d2D-dD*dgamma-d2T)-dD*(dN-dtau-self.grun[i]*dD-dT));
-                    self.grun_lamb[i]=((-self.B_c[i])*(1/self.grun[i]**2)*(self.B_c[i]*dgamma**2-self.grun[i]*(self.dBdP_c[i]*dgamma+self.B_c[i]*d2gamma)))/self.grun_q[i];
-                else:
-                    yk=1+self.grun0-self.grun_ideal
-                    K=(self.grun_const_d*self.eta[i]**self.grun_const_d-self.grun_const_c*yk*self.eta[i]**self.grun_const_c)
-                    dK=(self.grun_const_d**2*self.eta[i]**self.grun_const_d-self.grun_const_c**2*yk*self.eta[i]**self.grun_const_c)
-                    self.grun[i]=yk*self.eta[i]**self.grun_const_c-self.eta[i]**self.grun_const_d+self.grun_ideal
-                    self.grun_q[i]=K/self.grun[i]
-                    self.grun_lamb[i]=-(dK/K - self.grun_q[i])
+        self.grun = np.zeros_like(self.rho)
+        self.grun_q = np.zeros_like(self.rho)
+        self.grun_lamb = np.zeros_like(self.rho)
+        for i in range(len(self.rho)):
+            if(self.rho[i] >= self.rho0):
+                F=self.P_c[i]/self.B_c[i];
+                Ng=self.dBdP_c[i]/2-1/6;
+                Dg=1-(2*self.t[i]/3)*F;
+                Tg=(self.t[i]/3)*(1-F/3);
+                taug=(self.P_c[i]/3)*self.dtdP[i];
+                dF=1/self.B_c[i]-(self.P_c[i]*self.dBdP_c[i])/self.B_c[i]**2;
+                dN=self.d2BdP_c[i]/2;
+                dD=(-2/3)*(self.dtdP[i]*F+dF*self.t[i]);
+                dT=(self.dtdP[i]/3)*(1-F/3)-(dF*self.t[i])/9;
+                dtau=(1/3)*(self.dtdP[i]+self.P_c[i]*self.d2tdP[i]);
+                d2F=(1/self.B_c[i]**3)*(2*self.P_c[i]*self.dBdP_c[i]**2-self.B_c[i]*(self.P_c[i]*self.d2BdP_c[i]+2*self.dBdP_c[i]));
+                d2N=self.d3BdP_c[i]/2;
+                d2D=(-2/3)*(self.d2tdP[i]*F+2*self.dtdP[i]*dF+d2F*self.t[i]);
+                d2T=(self.d2tdP[i]/3)*(1-F/3)-2*(self.dtdP[i]/9)*dF-(d2F*self.t[i])/9;
+                d2tau=(1/3)*(2*self.d2tdP[i]+self.P_c[i]*self.d3tdP[i]);
+                self.grun[i]= (Ng-Tg-taug)/Dg;
+                dgamma=(1/Dg)*((dN-dtau-dT)-dD*self.grun[i]);
+                self.grun_q[i]=(-self.B_c[i]/self.grun[i])*dgamma;
+                d2gamma=(1/Dg**2)*(Dg*(d2N-d2tau-self.grun[i]*d2D-dD*dgamma-d2T)-dD*(dN-dtau-self.grun[i]*dD-dT));
+                self.grun_lamb[i]=((-self.B_c[i])*(1/self.grun[i]**2)*(self.B_c[i]*dgamma**2-self.grun[i]*(self.dBdP_c[i]*dgamma+self.B_c[i]*d2gamma)))/self.grun_q[i];
+            else:
+                yk=1+self.grun0-self.grun_ideal
+                K=(self.grun_const_d*self.eta[i]**self.grun_const_d-self.grun_const_c*yk*self.eta[i]**self.grun_const_c)
+                dK=(self.grun_const_d**2*self.eta[i]**self.grun_const_d-self.grun_const_c**2*yk*self.eta[i]**self.grun_const_c)
+                self.grun[i]=yk*self.eta[i]**self.grun_const_c-self.eta[i]**self.grun_const_d+self.grun_ideal
+                self.grun_q[i]=K/self.grun[i]
+                self.grun_lamb[i]=-(dK/K - self.grun_q[i])
         return self.grun,self.grun_q,self.grun_lamb
     
     
@@ -280,36 +347,34 @@ class varpoly(eos):
         self.calculate_grun_cold(self.rho)
         self.calculate_Cv(self.rho)
         self.calculate_U_cold(self.rho)
-        if type(self.U) is not np.ndarray:
-            self.U_therm = self.Cv*T
-            self.U = self.U_c + self.U_therm
+        self.U_therm = self.Cv*T
+        self.U = self.U_c + self.U_therm
         return self.U
             
     def calculate_U_cold(self,rho):
         self.checkmat(rho)
         self.calculate_P_cold(self.rho)
         self.calculate_grun_cold(self.rho)
-        if type(self.U_c) is not np.ndarray:
-            self.U_c = np.zeros_like(self.rho)
-            for i in range(len(self.rho)):
-                if(self.rho[i] >= self.rho0):              
-                    d=(1.-self.A1)/self.A1;
-                    xae=(self.A0/self.A1);
-                    K=(self.B0*math.exp(xae)/(self.A1*self.A0*self.rho0))*xae**(-d);
-                    n=(self.A1+self.A2)/self.A1;
-                    b=1./self.A1;
-                    xe=xae*(self.eta[i])**(-self.A1);
-                    C = xae**(n-1.)*mp.gammainc(1-n,a=xae);
-                    Fc1=xae**(self.A2/self.A1)*(1./b*(xe**b*mp.gammainc(1-n,a=xe)-mp.gammainc(1-n+b,a=xe)));
-                    Fc2=C*xe**(d+1.)/(d+1.);
-                    Fc10=xae**(self.A2/self.A1)*self.G2_const;
-                    Fc20=C*xae**(d+1.)/(d+1.);
-                    self.U_c[i]=-K*(Fc1-Fc2-Fc10+Fc20);
-                else:
-                    K=self.B0/(self.Pexp_const_a-self.Pexp_const_b)
-                    a=self.Pexp_const_a
-                    b=self.Pexp_const_b
-                    self.U_c[i]=K*(self.rho[i]**(a-1.)/(self.rho0**(a)*(a-1.))+(self.rho[i]**(b-1.))/(self.rho0**(b)*(1.-b)))
+        self.U_c = np.zeros_like(self.rho)
+        for i in range(len(self.rho)):
+            if(self.rho[i] >= self.rho0):              
+                d=(1.-self.A1)/self.A1;
+                xae=(self.A0/self.A1);
+                K=(self.B0*math.exp(xae)/(self.A1*self.A0*self.rho0))*xae**(-d);
+                n=(self.A1+self.A2)/self.A1;
+                b=1./self.A1;
+                xe=xae*(self.eta[i])**(-self.A1);
+                C = xae**(n-1.)*mp.gammainc(1-n,a=xae);
+                Fc1=xae**(self.A2/self.A1)*(1./b*(xe**b*mp.gammainc(1-n,a=xe)-mp.gammainc(1-n+b,a=xe)));
+                Fc2=C*xe**(d+1.)/(d+1.);
+                Fc10=xae**(self.A2/self.A1)*self.G2_const;
+                Fc20=C*xae**(d+1.)/(d+1.);
+                self.U_c[i]=-K*(Fc1-Fc2-Fc10+Fc20);
+            else:
+                K=self.B0/(self.Pexp_const_a-self.Pexp_const_b)
+                a=self.Pexp_const_a
+                b=self.Pexp_const_b
+                self.U_c[i]=K*(self.rho[i]**(a-1.)/(self.rho0**(a)*(a-1.))+(self.rho[i]**(b-1.))/(self.rho0**(b)*(1.-b)))
                     
 ####### Extract temperature from internal energy ################
     def calculate_TfromU(self,rho,U):
@@ -332,6 +397,9 @@ class varpoly(eos):
         self.checkmat(rho,T)
         self.calculate_P_iso(self.rho,self.T)
         
+    def calculate_P_el(self,rho,T):
+        self.checkmat(rho,T)
+        self.calculate_P_iso(self.rho,self.T)
         
     def calculate_P_iso(self,rho,T):
         self.checkmat(rho,T)    
@@ -356,16 +424,14 @@ class varpoly(eos):
         self.calculate_grun_cold(self.rho)
         self.calculate_Cv(self.rho)
         self.calculate_P_iso(self.rho,self.T)
-        if type(self.B_iso) is not np.ndarray:
-            self.B_iso = self.B_c+self.P_vib*(1-self.grun_q+self.dlnCvdlnrho)
+        self.B_iso = self.B_c+self.P_vib*(1-self.grun_q+self.dlnCvdlnrho)
     
 ####### PRESSURE DERIVATIVES OF ISOTHERMAL BULK MODULUS ################
     def calculate_dBdP_iso(self,rho,T):
         self.checkmat(rho,T)
         self.calculate_B_iso(self.rho,self.T)
         self.calculate_dBdP_cold(self.rho)
-        if type(self.dBdP_iso) is not np.ndarray:
-            self.dBdP_iso=self.dBdP_c*self.B_c/self.B_iso+(self.P_vib/self.B_iso)*( (1-self.grun_q+self.dlnCvdlnrho)**2+self.grun_lamb*self.grun_q+self.d2lnCvdlnrho)
+        self.dBdP_iso=self.dBdP_c*self.B_c/self.B_iso+(self.P_vib/self.B_iso)*( (1-self.grun_q+self.dlnCvdlnrho)**2+self.grun_lamb*self.grun_q+self.d2lnCvdlnrho)
 
 ####### ADIABATIC BULK MODULUS ################    
     def calculate_B(self,rho,T):
@@ -374,64 +440,54 @@ class varpoly(eos):
         self.calculate_P(self.rho,self.T)
         self.calculate_grun_cold(self.rho)
         self.calculate_Cv(self.rho)
-        if type(self.B) is not np.ndarray:
-            self.B = self.B_c+self.P_vib*(1-self.grun_q+self.grun+self.dlnCvdlnrho)
+        self.B = self.B_c+self.P_vib*(1-self.grun_q+self.grun+self.dlnCvdlnrho)
 ####### PRESSURE DERIVATIVES OF ADIABATIC BULK MODULUS ################
     def calculate_dBdP(self,rho,T):
         self.checkmat(rho,T)
         self.calculate_dBdP_iso(rho,self.T)
-        if type(self.dBdP) is not np.ndarray:
-            yaT=self.grun*(self.P_vib/self.B_iso)
-            self.dBdP=(self.dBdP_iso+yaT*(2+self.grun-3*self.grun_q-self.grun*self.dlnCvdlnT))/(1+yaT)
+        yaT=self.grun*(self.P_vib/self.B_iso)
+        self.dBdP=(self.dBdP_iso+yaT*(2+self.grun-3*self.grun_q-self.grun*self.dlnCvdlnT))/(1+yaT)
 ###### THERM EXP ####
     def calculate_thermexp(self,rho,T):
         self.checkmat(rho,T)
         self.calculate_P(self.rho,self.T)
         self.calculate_B_iso(self.rho,self.T)
-        if self.thermexp is not np.ndarray:
-            self.thermexp=(self.grun*self.rho*self.Cv/self.B_iso)
+        self.thermexp=(self.grun*self.rho*self.Cv/self.B_iso)
 ###### HEAT CAPACITY RATIO ####        
     def calculate_heatcapratio(self,rho,T):
         self.checkmat(rho,T)
         self.thermexp(self.rho,self.T)
-        if self.heatcapratio is not np.ndarray:
-            self.heatcapratio=1+self.grun*self.thermexp*T
+        self.heatcapratio=1+self.grun*self.thermexp*T
 ###### Cp ####        
     def calculate_Cp(self,rho,T):
         self.checkmat(rho,T)
         self.calculate_heatcapratio(self.rho,self.T)
-        if self.Cp is not np.ndarray:
-            self.Cp=self.heatcapratio*self.Cv
+        self.Cp=self.heatcapratio*self.Cv
         
 ### Entalphy
     def calculate_H(self,rho,T):
         self.checkmat(rho,T)
         self.calculate_U(self.rho,self.T)
         self.calculate_P(self.rho,self.T)
-        if type(self.H) is not np.ndarray:
-            self.H=self.U+self.P/self.rho
+        self.H=self.U+self.P/self.rho
 ## Entropy      
     def calculate_S(self,rho,T):
         self.checkmat(rho,T)
         self.calculate_grun_integral(self.rho)
         self.calculate_Cv(self.rho)
-        if type(self.S) is not np.ndarray:
-            self.S=self.Cv*(np.log(self.T)-self.grun_int)
+        self.S=self.Cv*(np.log(self.T)-self.grun_int)
 ## Gibbs free energy        
     def calculate_G(self,rho,T):
         self.checkmat(rho,T)
-        self.calculate_U(self.rho,self.T)
+        self.calculate_H(self.rho,self.T)
         self.calculate_S(self.rho,self.T)
-        self.calculate_P(self.rho,self.T)
-        if type(self.G) is not np.ndarray:
-            self.G=self.U+self.P/self.rho-self.T*self.S
+        self.G=self.H-self.T*self.S
 ## Helmholtz free energy
     def calculate_F(self,rho,T):
         self.checkmat(rho,T)
         self.calculate_U(self.rho,self.T)
         self.calculate_S(self.rho,self.T)
-        if type(self.F) is not np.ndarray:
-            self.F=self.U-T*self.S
+        self.F=self.U-T*self.S
 ## Speed of sound            
     def calculate_cs(self,rho,u):
         self.calculate_B(rho,u)
@@ -489,8 +545,7 @@ class varpoly(eos):
     
     def setup_integrator(self):
         self.test=varpoly()
-        self.test.creatematerial(self.rho0,self.B0,self.dBdP0,self.AA,self.ZZ,self.tmin,self.delta)
-        self.test.createexpstate(a=self.Pexp_const_a,b=self.Pexp_const_b,c=self.grun_const_c)
+        self.test.creatematerial(self.rho0,self.B0,self.dBdP0,self.AA,self.ZZ,self.tmin,self.delta,self.Pexp_const_a,self.Pexp_const_b,self.grun_const_c)
     
     
     
@@ -507,6 +562,17 @@ class varpoly(eos):
                     #integ2=integrate.quad(self.test.grun_integrand, self.rho[-1],self.rho[i])
                     self.grun_int[i]=integ[0]
                     #self.grun_int2[i]=-integ2[0]
+                    
+    def calculate_grun_integral_test(self, rho):
+        self.checkmat(rho)
+        self.calculate_grun_cold(rho)
+        self.setup_integrator()
+        self.grun_int = np.zeros_like(self.rho)
+        grun_integrand_values = np.zeros_like(self.rho)
+    
+        for i in range(len(self.rho)):
+            grun_integrand_values[:i+1] = self.test.grun_integrand(self.rho[:i+1])
+            self.grun_int[i] = np.trapz(grun_integrand_values[:i+1], self.rho[:i+1])
 
 ## calculate Hugoniot curve
     def gethugoniot(self,rho):
@@ -533,8 +599,7 @@ class varpoly(eos):
         
     def fittohugoniotfunc(self,x,B,tmin,delta):
         self.test=varpoly()
-        self.test.creatematerial(self.rho0,B,self.dBdP0,self.AA,self.ZZ,tmin,delta)
-        self.test.createexpstate(self.Pexp_const_a,c=self.grun_const_c)
+        self.test.creatematerial(self.rho0,B,self.dBdP0,self.AA,self.ZZ,tmin,delta,self.Pexp_const_a,self.Pexp_const_b,self.grun_const_c)
         self.test.gethugoniot(x)
         return self.test.Ph
 ## fit cold expanded state curve to Evap 
@@ -544,7 +609,7 @@ class varpoly(eos):
         return res.x
         
     def fittovapenergyfunc(self,x,E):
-        self.test.createexpstate(x,c=self.grun_const_c)
+        self.test.creatematerial(self.rho0,self.B0,self.dBdP0,self.AA,self.ZZ,self.tmin,self.delta,a_exp=x,b_exp=self.Pexp_const_b,c_exp=self.grun_const_c)
         integE=self.B0/((x-self.Pexp_const_b)*self.rho0)*(1./(x-1.)-1./(self.Pexp_const_b-1.))
         print(integE[0],integE[0],E,x)
         return abs(integE[0]+E)
@@ -561,7 +626,7 @@ class varpoly(eos):
 
     def fittoTcritfunc(self,x,Tc):
         print(x)
-        self.test.createexpstate(a=self.Pexp_const_a,c=x)
+        self.test.creatematerial(self.rho0,self.B0,self.dBdP0,self.AA,self.ZZ,self.tmin,self.delta,a_exp=self.Pexp_const_a,b_exp=self.Pexp_const_b,c_exp=x)
         Tcritfound=self.test.findTcrit()
         print("Crit T: ",Tcritfound,Tc)
         return abs(Tcritfound-Tc)
@@ -673,3 +738,4 @@ class varpoly(eos):
     
     def fitparameters(self,a,b,B0):
         pass
+
